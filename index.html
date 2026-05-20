@@ -552,20 +552,29 @@ function fmtFeet(ftVal, inVal){
   if(fmt === 'words') return `${ftR} ${ftR===1?'foot':'feet'} ${inVal} inches`;
   return `${ftR}'-${inFmt}`;
 }
-
-// ── Core measurement parser (v3 — token-leak fix) ──
-// BUG FIXED: previous version tokenized digits INSIDE existing §tokens§,
-// causing §N3§ to appear in "20 §N3§-0.25 inch 90s".
-// Fix: process numeric fractions and plain digits BEFORE word tokenization,
-// and use a single-pass regex that never re-enters already-replaced text.
+// ── Core measurement parser (v4 — quantity & quote fix) ──
 function parseMeas(text){
   if(!text || !text.trim()) return text;
 
   // Preserve original case for non-measurement parts — work on lowercase copy
+  // Normalize iOS curly quotes to standard straight quotes immediately
   let work = text.toLowerCase()
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
     .replace(/\bby\b/gi, ' x ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  // ── Step 0: Convert spoken quantities at the start of the phrase ──
+  const numPatQuant = Object.keys(WNUMS_RAW)
+    .sort((a,b) => b.length - a.length)
+    .map(w => w.replace(/\s+/g,'\\s+'))
+    .join('|');
+  
+  work = work.replace(
+    new RegExp(`^(${numPatQuant})\\b`, 'i'),
+    (_, w) => WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')] + ' '
+  );
 
   // ── Step 1: degree shorthand ──
   work = work
@@ -574,17 +583,26 @@ function parseMeas(text){
     .replace(/\b90-?degree\b/gi, '90 degree')
     .replace(/\b45-?degree\b/gi, '45 degree');
 
-  // ── Step 2a: digit-space-fraction compounds — "1 1/4" "1 1/2" "2 3/4" ──
-  // These appear in pipe size notation: 1 1/4", 1 1/2", 2 1/2"
-  // Must run BEFORE the plain fraction pass
+  // ── Step 2a: digit-space-fraction compounds — "1 1/4" vs "20 3/4" ──
   work = work.replace(/(\d+)\s+(\d+)\s*\/\s*(\d+)(?=\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|"|'|\s|$))/gi,
     (_, whole, num, den) => {
+      const w = parseInt(whole);
       const d = parseInt(den);
       if(!d) return _;
-      return fmtInch(parseInt(whole) + parseInt(num)/d) + ' ';
+      const frac = parseInt(num) / d;
+      
+      // Standard mixed pipe sizes are usually 1-1/4, 1-1/2, 2-1/2, 3-1/2.
+      // If it's outside this range, treat the first number as a quantity.
+      const isMixedSize = (w >= 1 && w <= 4) && (frac === 0.25 || frac === 0.5);
+
+      if(isMixedSize) {
+        return fmtInch(w + frac) + ' '; // e.g. "1 1/2" -> "1½"
+      } else {
+        return `${w} ` + fmtInch(frac) + ' '; // e.g. "20 3/4" -> "20 ¾" "
+      }
     });
 
-  // ── Step 2b: numeric fractions with explicit unit — "3/4 inch" "1/2 foot" ──
+  // ── Step 2b: numeric fractions with explicit unit ──
   work = work.replace(/(\d+)\s*\/\s*(\d+)\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|mm|cm|"|')/gi,
     (m, n, d) => {
       const dv = parseInt(d);
@@ -595,8 +613,6 @@ function parseMeas(text){
     });
 
   // ── Step 2c: bare fractions with NO unit but followed by trade term ──
-  // "3/4 MIPs"  "1/2 FTG"  "3/4 x 1/2 bushing"  "1/4 MIP"
-  // Match fraction at start of word boundary NOT already converted (no " after)
   work = work.replace(/(\d+)\s*\/\s*(\d+)(?="?\s*(?:x\s+\d|[a-z]))/gi,
     (_, n, d) => {
       const dv = parseInt(d);
@@ -605,13 +621,10 @@ function parseMeas(text){
     });
 
   // ── Step 3: spoken whole+fraction combinations ──
-  const numPat = Object.keys(WNUMS_RAW)
-    .sort((a,b) => b.length - a.length)
-    .map(w => w.replace(/\s+/g,'\\s+'))
-    .join('|');
+  const numPat = numPatQuant;
   const fracSorted = Object.entries(FRACS).sort((a,b) => b[0].length - a[0].length);
-  const UNIT_RE = '(?:inch(?:es)?|in\\b|foot|feet|ft\\b|mm|cm)';
-  const UNIT_OPT = `(?:\\s+${UNIT_RE})?`; // unit is optional — "one and a half" alone is still 1½"
+  const UNIT_RE = '(?:inch(?:es)?|in\\b|foot|feet|ft\\b|mm|cm|"|\')';
+  const UNIT_OPT = `(?:\\s*${UNIT_RE})?`; // \s* instead of \s+ for attached quotes
 
   for(const [phrase, fracVal] of fracSorted){
     const fesc = phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -628,13 +641,11 @@ function parseMeas(text){
       (_, d) => fmtInch(parseInt(d) + fracVal) + ' ');
     // "three quarter inch" / "half inch" / "quarter" alone before trade term
     work = work.replace(
-      new RegExp(`\\b${fesc}(?:\\s+${UNIT_RE}|(?=\\s+(?:mip|fip|ftg|npt|copper|pipe|fitting|elbow|tee|coupling|union|nipple|valve|adapter|ball|bushing|reducer)))`, 'gi'),
+      new RegExp(`\\b${fesc}(?:\\s*${UNIT_RE}|(?=\\s+(?:mip|fip|ftg|npt|copper|pipe|fitting|elbow|tee|coupling|union|nipple|valve|adapter|ball|bushing|reducer)))`, 'gi'),
       () => fmtInch(fracVal) + ' ');
   }
 
   // ── Step 4: spoken whole numbers + unit ──
-  // MUST handle "two foot six" BEFORE converting "two foot" alone
-  // "ten foot six" / "two foot six" / "three foot six"
   work = work.replace(
     new RegExp(`\\b(${numPat})\\s+(?:foot|feet|ft)\\s+(${numPat})\\b(?!\\s*(?:inch|foot|feet|ft))`, 'gi'),
     (_, ftWord, inWord) => {
@@ -657,7 +668,6 @@ function parseMeas(text){
   const numPat2 = Object.keys(WNUMS_RAW).sort((a,b)=>b.length-a.length)
     .map(w=>w.replace(/\s+/g,'\\s+')).join('|');
 
-  // "two foot six" / "ten foot six" — spoken digit+foot+spoken_inch
   work = work.replace(
     new RegExp(`\\b(${numPat2})\\s+(?:foot|feet|ft)\\s+(${numPat2})\\b(?!\\s*inch)`, 'gi'),
     (_, ftWord, inWord) => {
@@ -667,33 +677,27 @@ function parseMeas(text){
       return _;
     });
 
-  // "10 foot 6" / "2 feet 6 inch" — digit foot digit
   work = work.replace(/(\d+)\s*(?:foot|feet|ft)\s+(\d+)(?:\s*(?:inch(?:es)?|in\b|"))?/gi,
     (_, ft, inches) => fmtFeet(parseInt(ft), parseInt(inches)));
 
-  // "10 foot" / "20 feet" — spoken word feet  
   work = work.replace(
     new RegExp(`\\b(${numPat2})\\s+(?:foot|feet|ft)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtFeet(n,0)+' ':_; });
 
-  // plain digit feet
   work = work.replace(/(\d+(?:\.\d+)?)\s*(?:foot|feet|ft\b)/gi,
     (_, n) => fmtFeet(parseFloat(n), 0));
 
   // ── Step 6: digit + inch / double-quote ──
   work = work.replace(/(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|in\b|")/gi,
     (_, n) => fmtInch(parseFloat(n)));
-  // Clean up orphaned "inch/inches" left after compound fraction conversion
-  // e.g. "2½" inch pipe" → "2½" pipe"
+  
   work = work.replace(/([¼½¾⅛⅜⅝⅞]"|\d+[¼½¾⅛⅜⅝⅞]?"?)\s+inch(?:es)?\b/gi,
     (_, m) => m + ' ');
 
   // ── Step 7: bare standalone digit in size context ──
-  // After 'x' connector: "1¼" x 1 reducer" → "1¼" x 1" reducer"
-  // Pattern: 'x' followed by lone digit (1-4) then a non-digit trade term
   work = work.replace(/\bx\s+([1-4])\s+(?=[a-z])/gi,
     (_, n) => 'x ' + fmtInch(parseInt(n)) + ' ');
-  // At start or after space: lone 1-4 before pipe fitting term
+  
   work = work.replace(/(?:^|\s)([1-4])\s+(?=(?:mip|fip|ftg|npt|inch|copper|pipe|fitting|elbow|tee|coupling|union|nipple|valve|adapter|bushing|reducer|ball|brass)\b)/gi,
     (m, n) => ' ' + fmtInch(parseInt(n)) + ' ');
 
@@ -702,7 +706,6 @@ function parseMeas(text){
 
   return work.replace(/\s+/g, ' ').trim();
 }
-
 function hasMeas(t){
   if(!t) return false;
   return /\d[\s]*["']/.test(t)
@@ -1540,12 +1543,12 @@ const PHONETIC = [
   [/brook[s]?\s*instrument/gi,    'Brooks Instrument'],
 
 
-  // ── Degree/angle elbows ───────────────────────────────────────────────────
+// ── Degree/angle elbows ───────────────────────────────────────────────────
   [/\bnineties\b/gi,                '90 degree elbows'],
-  [/\bninety\s+degree\b/gi,        '90 degree elbow'],
-  [/\b90s\b/gi,                     '90 degree elbows'],
-  [/\b45s\b/gi,                     '45 degree elbows'],
-  [/\bforty.?five\s+degree\b/gi,   '45 degree elbow'],
+  [/\bninety\s+degree\b/gi,         '90 degree elbow'],
+  [/\b90['’]?s\b/gi,                '90 degree elbows'],
+  [/\b45['’]?s\b/gi,                '45 degree elbows'],
+  [/\bforty.?five\s+degree\b/gi,    '45 degree elbow'],
 
 
 ];
