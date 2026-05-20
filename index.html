@@ -552,11 +552,10 @@ function fmtFeet(ftVal, inVal){
   if(fmt === 'words') return `${ftR} ${ftR===1?'foot':'feet'} ${inVal} inches`;
   return `${ftR}'-${inFmt}`;
 }
-// ── Core measurement parser (v4 — quantity & quote fix) ──
+// ── Core measurement parser (v5 — robust quantity separation) ──
 function parseMeas(text){
   if(!text || !text.trim()) return text;
 
-  // Preserve original case for non-measurement parts — work on lowercase copy
   // Normalize iOS curly quotes to standard straight quotes immediately
   let work = text.toLowerCase()
     .replace(/[\u201C\u201D]/g, '"')
@@ -565,7 +564,7 @@ function parseMeas(text){
     .replace(/\s+/g, ' ')
     .trim();
 
-  // ── Step 0: Convert spoken quantities at the start of the phrase ──
+  // ── Step 0: Extract leading spoken quantities ──
   const numPatQuant = Object.keys(WNUMS_RAW)
     .sort((a,b) => b.length - a.length)
     .map(w => w.replace(/\s+/g,'\\s+'))
@@ -578,28 +577,19 @@ function parseMeas(text){
 
   // ── Step 1: degree shorthand ──
   work = work
-    .replace(/\b90s\b/gi, '90 degree elbows')
-    .replace(/\b45s\b/gi, '45 degree elbows')
+    .replace(/\b90['’]?s\b/gi, '90 degree elbows')
+    .replace(/\b45['’]?s\b/gi, '45 degree elbows')
     .replace(/\b90-?degree\b/gi, '90 degree')
     .replace(/\b45-?degree\b/gi, '45 degree');
 
-  // ── Step 2a: digit-space-fraction compounds — "1 1/4" vs "20 3/4" ──
-  work = work.replace(/(\d+)\s+(\d+)\s*\/\s*(\d+)(?=\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|"|'|\s|$))/gi,
+  // ── Step 2a: digit-space-fraction compounds ──
+  work = work.replace(/(\d+)\s+(\d+)\s*\/\s*(\d+)(?=\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|"|'|\s|$|[a-z]))/gi,
     (_, whole, num, den) => {
       const w = parseInt(whole);
       const d = parseInt(den);
       if(!d) return _;
-      const frac = parseInt(num) / d;
-      
-      // Standard mixed pipe sizes are usually 1-1/4, 1-1/2, 2-1/2, 3-1/2.
-      // If it's outside this range, treat the first number as a quantity.
-      const isMixedSize = (w >= 1 && w <= 4) && (frac === 0.25 || frac === 0.5);
-
-      if(isMixedSize) {
-        return fmtInch(w + frac) + ' '; // e.g. "1 1/2" -> "1½"
-      } else {
-        return `${w} ` + fmtInch(frac) + ' '; // e.g. "20 3/4" -> "20 ¾" "
-      }
+      // "1 1/4" becomes "1¼"
+      return fmtInch(w + (parseInt(num)/d)) + ' ';
     });
 
   // ── Step 2b: numeric fractions with explicit unit ──
@@ -624,22 +614,19 @@ function parseMeas(text){
   const numPat = numPatQuant;
   const fracSorted = Object.entries(FRACS).sort((a,b) => b[0].length - a[0].length);
   const UNIT_RE = '(?:inch(?:es)?|in\\b|foot|feet|ft\\b|mm|cm|"|\')';
-  const UNIT_OPT = `(?:\\s*${UNIT_RE})?`; // \s* instead of \s+ for attached quotes
+  const UNIT_OPT = `(?:\\s*${UNIT_RE})?`;
 
   for(const [phrase, fracVal] of fracSorted){
     const fesc = phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-    // "two and a half inch" / "two and a half"
     work = work.replace(
       new RegExp(`\\b(${numPat})\\s+and\\s+(?:a\\s+)?${fesc}${UNIT_OPT}`, 'gi'),
       (_, wWord) => {
         const wNum = WNUMS_RAW[wWord.toLowerCase().replace(/\s+/g,' ')];
         return wNum !== undefined ? fmtInch(wNum + fracVal) + ' ' : _;
       });
-    // "2 and a half inch" / "2 and a half"
     work = work.replace(
       new RegExp(`\\b(\\d+)\\s+and\\s+(?:a\\s+)?${fesc}${UNIT_OPT}`, 'gi'),
       (_, d) => fmtInch(parseInt(d) + fracVal) + ' ');
-    // "three quarter inch" / "half inch" / "quarter" alone before trade term
     work = work.replace(
       new RegExp(`\\b${fesc}(?:\\s*${UNIT_RE}|(?=\\s+(?:mip|fip|ftg|npt|copper|pipe|fitting|elbow|tee|coupling|union|nipple|valve|adapter|ball|bushing|reducer)))`, 'gi'),
       () => fmtInch(fracVal) + ' ');
@@ -655,11 +642,9 @@ function parseMeas(text){
         return fmtFeet(ft, ins) + ' ';
       return _;
     });
-  // plain spoken foot: "ten foot" "twenty foot"
   work = work.replace(
     new RegExp(`\\b(${numPat})\\s+(foot|feet|ft)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtFeet(n,0)+' ':_; });
-  // spoken inch: "six inch" "one inch"
   work = work.replace(
     new RegExp(`\\b(${numPat})\\s+(inch(?:es)?)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtInch(n)+' ':_; });
@@ -678,18 +663,18 @@ function parseMeas(text){
     });
 
   work = work.replace(/(\d+)\s*(?:foot|feet|ft)\s+(\d+)(?:\s*(?:inch(?:es)?|in\b|"))?/gi,
-    (_, ft, inches) => fmtFeet(parseInt(ft), parseInt(inches)));
+    (_, ft, inches) => fmtFeet(parseInt(ft), parseInt(inches)) + ' ');
 
   work = work.replace(
     new RegExp(`\\b(${numPat2})\\s+(?:foot|feet|ft)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtFeet(n,0)+' ':_; });
 
   work = work.replace(/(\d+(?:\.\d+)?)\s*(?:foot|feet|ft\b)/gi,
-    (_, n) => fmtFeet(parseFloat(n), 0));
+    (_, n) => fmtFeet(parseFloat(n), 0) + ' ');
 
   // ── Step 6: digit + inch / double-quote ──
   work = work.replace(/(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|in\b|")/gi,
-    (_, n) => fmtInch(parseFloat(n)));
+    (_, n) => fmtInch(parseFloat(n)) + ' ');
   
   work = work.replace(/([¼½¾⅛⅜⅝⅞]"|\d+[¼½¾⅛⅜⅝⅞]?"?)\s+inch(?:es)?\b/gi,
     (_, m) => m + ' ');
@@ -703,6 +688,32 @@ function parseMeas(text){
 
   // ── Step 8: safety net ──
   work = work.replace(/§[NF](\d+(?:\.\d+)?)§/g, '$1');
+
+  // ── Step 9: Format Leading Quantities (Universal Separator) ──
+  // Intelligently inserts a hyphen between a leading quantity and the size
+  // e.g., "5 1¼" 90s" -> "5 - 1¼" 90s"
+  // e.g., "10 ½" x ¾" tees" -> "10 - ½" x ¾" tees"
+  let parts = work.replace(/\s+/g, ' ').trim().split(' ');
+  if (parts.length >= 2 && /^\d+$/.test(parts[0])) {
+    let sizeEndIdx = -1;
+    // Walk forward through the words to capture the whole measurement block
+    for (let i = 1; i < parts.length; i++) {
+      // If the word contains a quote, fraction symbol, or is "x", it belongs to the measurement
+      if (parts[i].includes('"') || parts[i].includes("'") || /[¼½¾⅛⅜⅝⅞]/.test(parts[i]) || parts[i] === 'x') {
+        sizeEndIdx = i;
+      } else {
+        break; // We hit a standard word like "elbows" or "copper", so stop
+      }
+    }
+    
+    // If we found a valid measurement block right after the quantity, format it
+    if (sizeEndIdx >= 1) {
+      const qty = parts[0];
+      const sizeStr = parts.slice(1, sizeEndIdx + 1).join(' ');
+      const rest = parts.slice(sizeEndIdx + 1).join(' ');
+      work = `${qty} - ${sizeStr} ${rest}`;
+    }
+  }
 
   return work.replace(/\s+/g, ' ').trim();
 }
@@ -726,6 +737,25 @@ function hasMeas(t){
    All matches are case-insensitive.
 ══ */
 const PHONETIC = [
+  const PHONETIC = [
+  // ── Specific Fraction & Quantity Slang ────────────────────────────────────
+  [/\binch\s+and\s+a\s+quarter\b/gi, '1 1/4 inch'],
+  [/\binch\s+and\s+a\s+1\/4\b/gi,    '1 1/4 inch'],
+  [/\binch\s+and\s+a\s+half\b/gi,    '1 1/2 inch'],
+  [/\binch\s+and\s+a\s+1\/2\b/gi,    '1 1/2 inch'],
+  [/\binch\s+and\s+three\s+quarters?\b/gi, '1 3/4 inch'],
+  [/\binch\s+and\s+an\s+eighth\b/gi, '1 1/8 inch'],
+  
+  // Protect quantity + fraction from merging (e.g., "20 three quarter" -> "20 3/4")
+  [/\b(\d+)\s+three\s+quarters?\b/gi, '$1 3/4'],
+  [/\b(\d+)\s+one\s+half\b/gi, '$1 1/2'],
+  [/\b(\d+)\s+a\s+half\b/gi, '$1 1/2'],
+  [/\b(\d+)\s+one\s+quarter\b/gi, '$1 1/4'],
+  [/\b(\d+)\s+a\s+quarter\b/gi, '$1 1/4'],
+  
+  // ── Pipe sizes — what STT actually outputs ──────────────────────────────
+  // (Keep the rest of your existing PHONETIC rules below here...)
+  
   // ── Pipe sizes — what STT actually outputs ──────────────────────────────
   // "three quarter" is the most common; engine often hears:
   [/three water/gi,          'three quarter'],
