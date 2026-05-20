@@ -552,7 +552,7 @@ function fmtFeet(ftVal, inVal){
   if(fmt === 'words') return `${ftR} ${ftR===1?'foot':'feet'} ${inVal} inches`;
   return `${ftR}'-${inFmt}`;
 }
-// ── Core measurement parser (v5 — robust quantity separation) ──
+// ── Core measurement parser (v6 — Trade Grade & Universal Quantity Sep) ──
 function parseMeas(text){
   if(!text || !text.trim()) return text;
 
@@ -564,7 +564,7 @@ function parseMeas(text){
     .replace(/\s+/g, ' ')
     .trim();
 
-  // ── Step 0: Extract leading spoken quantities ──
+  // ── Step 0: Extract leading spoken quantities ("five" -> "5") ──
   const numPatQuant = Object.keys(WNUMS_RAW)
     .sort((a,b) => b.length - a.length)
     .map(w => w.replace(/\s+/g,'\\s+'))
@@ -575,24 +575,33 @@ function parseMeas(text){
     (_, w) => WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')] + ' '
   );
 
-  // ── Step 1: degree shorthand ──
+  // ── Step 1: Degree shorthand ──
   work = work
     .replace(/\b90['’]?s\b/gi, '90 degree elbows')
     .replace(/\b45['’]?s\b/gi, '45 degree elbows')
+    .replace(/\b22['’]?s\b/gi, '22 degree elbows')
     .replace(/\b90-?degree\b/gi, '90 degree')
     .replace(/\b45-?degree\b/gi, '45 degree');
 
-  // ── Step 2a: digit-space-fraction compounds ──
+  // ── Step 2a: Digit-space-fraction (e.g. 1 1/4 vs 20 3/4) ──
   work = work.replace(/(\d+)\s+(\d+)\s*\/\s*(\d+)(?=\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|"|'|\s|$|[a-z]))/gi,
     (_, whole, num, den) => {
       const w = parseInt(whole);
       const d = parseInt(den);
       if(!d) return _;
-      // "1 1/4" becomes "1¼"
-      return fmtInch(w + (parseInt(num)/d)) + ' ';
+      const frac = parseInt(num) / d;
+      
+      // If the whole number is large (>=10) OR it's > 6 and not a clean half,
+      // it's highly likely a quantity followed by a fraction (e.g. "12 3/4").
+      // Standard pipe sizes are 1¼, 1½, 2½, 3½, etc.
+      if (w >= 10 || (w > 6 && frac !== 0.5)) {
+        return `${w} ` + fmtInch(frac) + ' '; 
+      } else {
+        return fmtInch(w + frac) + ' '; 
+      }
     });
 
-  // ── Step 2b: numeric fractions with explicit unit ──
+  // ── Step 2b: Numeric fractions with explicit unit ──
   work = work.replace(/(\d+)\s*\/\s*(\d+)\s*(?:inch(?:es)?|in\b|foot|feet|ft\b|mm|cm|"|')/gi,
     (m, n, d) => {
       const dv = parseInt(d);
@@ -602,7 +611,7 @@ function parseMeas(text){
       return (/foot|feet|ft|'/.test(u) ? fmtFeet(val, 0) : fmtInch(val)) + ' ';
     });
 
-  // ── Step 2c: bare fractions with NO unit but followed by trade term ──
+  // ── Step 2c: Bare fractions with NO unit but followed by trade term ──
   work = work.replace(/(\d+)\s*\/\s*(\d+)(?="?\s*(?:x\s+\d|[a-z]))/gi,
     (_, n, d) => {
       const dv = parseInt(d);
@@ -610,7 +619,7 @@ function parseMeas(text){
       return fmtInch(parseInt(n)/dv) + ' ';
     });
 
-  // ── Step 3: spoken whole+fraction combinations ──
+  // ── Step 3: Spoken whole+fraction combinations ──
   const numPat = numPatQuant;
   const fracSorted = Object.entries(FRACS).sort((a,b) => b[0].length - a[0].length);
   const UNIT_RE = '(?:inch(?:es)?|in\\b|foot|feet|ft\\b|mm|cm|"|\')';
@@ -632,14 +641,13 @@ function parseMeas(text){
       () => fmtInch(fracVal) + ' ');
   }
 
-  // ── Step 4: spoken whole numbers + unit ──
+  // ── Step 4: Spoken whole numbers + unit ──
   work = work.replace(
     new RegExp(`\\b(${numPat})\\s+(?:foot|feet|ft)\\s+(${numPat})\\b(?!\\s*(?:inch|foot|feet|ft))`, 'gi'),
     (_, ftWord, inWord) => {
       const ft = WNUMS_RAW[ftWord.toLowerCase().replace(/\s+/g,' ')];
       const ins = WNUMS_RAW[inWord.toLowerCase().replace(/\s+/g,' ')];
-      if(ft !== undefined && ins !== undefined && ins >= 1 && ins <= 11)
-        return fmtFeet(ft, ins) + ' ';
+      if(ft !== undefined && ins !== undefined && ins >= 1 && ins <= 11) return fmtFeet(ft, ins) + ' ';
       return _;
     });
   work = work.replace(
@@ -649,10 +657,8 @@ function parseMeas(text){
     new RegExp(`\\b(${numPat})\\s+(inch(?:es)?)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtInch(n)+' ':_; });
 
-  // ── Step 5: foot+inch combos ──
-  const numPat2 = Object.keys(WNUMS_RAW).sort((a,b)=>b.length-a.length)
-    .map(w=>w.replace(/\s+/g,'\\s+')).join('|');
-
+  // ── Step 5: Foot+inch combos ──
+  const numPat2 = Object.keys(WNUMS_RAW).sort((a,b)=>b.length-a.length).map(w=>w.replace(/\s+/g,'\\s+')).join('|');
   work = work.replace(
     new RegExp(`\\b(${numPat2})\\s+(?:foot|feet|ft)\\s+(${numPat2})\\b(?!\\s*inch)`, 'gi'),
     (_, ftWord, inWord) => {
@@ -661,61 +667,35 @@ function parseMeas(text){
       if(ft !== undefined && inches !== undefined && inches <= 11) return fmtFeet(ft, inches) + ' ';
       return _;
     });
-
   work = work.replace(/(\d+)\s*(?:foot|feet|ft)\s+(\d+)(?:\s*(?:inch(?:es)?|in\b|"))?/gi,
     (_, ft, inches) => fmtFeet(parseInt(ft), parseInt(inches)) + ' ');
-
   work = work.replace(
     new RegExp(`\\b(${numPat2})\\s+(?:foot|feet|ft)\\b`, 'gi'),
     (_, w) => { const n=WNUMS_RAW[w.toLowerCase().replace(/\s+/g,' ')]; return n!==undefined ? fmtFeet(n,0)+' ':_; });
+  work = work.replace(/(\d+(?:\.\d+)?)\s*(?:foot|feet|ft\b)/gi, (_, n) => fmtFeet(parseFloat(n), 0) + ' ');
 
-  work = work.replace(/(\d+(?:\.\d+)?)\s*(?:foot|feet|ft\b)/gi,
-    (_, n) => fmtFeet(parseFloat(n), 0) + ' ');
+  // ── Step 6: Digit + inch / double-quote ──
+  work = work.replace(/(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|in\b|")/gi, (_, n) => fmtInch(parseFloat(n)) + ' ');
+  work = work.replace(/([¼½¾⅛⅜⅝⅞]"|\d+[¼½¾⅛⅜⅝⅞]?"?)\s+inch(?:es)?\b/gi, (_, m) => m + ' ');
 
-  // ── Step 6: digit + inch / double-quote ──
-  work = work.replace(/(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|in\b|")/gi,
-    (_, n) => fmtInch(parseFloat(n)) + ' ');
-  
-  work = work.replace(/([¼½¾⅛⅜⅝⅞]"|\d+[¼½¾⅛⅜⅝⅞]?"?)\s+inch(?:es)?\b/gi,
-    (_, m) => m + ' ');
-
-  // ── Step 7: bare standalone digit in size context ──
-  work = work.replace(/\bx\s+([1-4])\s+(?=[a-z])/gi,
-    (_, n) => 'x ' + fmtInch(parseInt(n)) + ' ');
-  
+  // ── Step 7: Bare standalone digit in size context ──
+  work = work.replace(/\bx\s+([1-4])\s+(?=[a-z])/gi, (_, n) => 'x ' + fmtInch(parseInt(n)) + ' ');
   work = work.replace(/(?:^|\s)([1-4])\s+(?=(?:mip|fip|ftg|npt|inch|copper|pipe|fitting|elbow|tee|coupling|union|nipple|valve|adapter|bushing|reducer|ball|brass)\b)/gi,
     (m, n) => ' ' + fmtInch(parseInt(n)) + ' ');
 
-  // ── Step 8: safety net ──
+  // ── Step 8: Safety net ──
   work = work.replace(/§[NF](\d+(?:\.\d+)?)§/g, '$1');
 
-  // ── Step 9: Format Leading Quantities (Universal Separator) ──
-  // Intelligently inserts a hyphen between a leading quantity and the size
-  // e.g., "5 1¼" 90s" -> "5 - 1¼" 90s"
-  // e.g., "10 ½" x ¾" tees" -> "10 - ½" x ¾" tees"
-  let parts = work.replace(/\s+/g, ' ').trim().split(' ');
-  if (parts.length >= 2 && /^\d+$/.test(parts[0])) {
-    let sizeEndIdx = -1;
-    // Walk forward through the words to capture the whole measurement block
-    for (let i = 1; i < parts.length; i++) {
-      // If the word contains a quote, fraction symbol, or is "x", it belongs to the measurement
-      if (parts[i].includes('"') || parts[i].includes("'") || /[¼½¾⅛⅜⅝⅞]/.test(parts[i]) || parts[i] === 'x') {
-        sizeEndIdx = i;
-      } else {
-        break; // We hit a standard word like "elbows" or "copper", so stop
-      }
-    }
-    
-    // If we found a valid measurement block right after the quantity, format it
-    if (sizeEndIdx >= 1) {
-      const qty = parts[0];
-      const sizeStr = parts.slice(1, sizeEndIdx + 1).join(' ');
-      const rest = parts.slice(sizeEndIdx + 1).join(' ');
-      work = `${qty} - ${sizeStr} ${rest}`;
-    }
-  }
+  // ── Step 9: Universal Material Separator ──
+  // If the text starts with a number, and the VERY NEXT word is a size 
+  // (a digit, a fraction symbol, or a quote), it injects a " - " between them.
+  // Example: "5 1¼" 90s" -> "5 - 1¼" 90s"
+  // Example: "20 ¾" tees" -> "20 - ¾" tees"
+  work = work.trim();
+  work = work.replace(/^(\d+)\s+(?=\d|¼|½|¾|⅛|⅜|⅝|⅞)/, '$1 - ');
 
   return work.replace(/\s+/g, ' ').trim();
+}
 }
 function hasMeas(t){
   if(!t) return false;
@@ -737,25 +717,35 @@ function hasMeas(t){
    All matches are case-insensitive.
 ══ */
 const PHONETIC = [
-  const PHONETIC = [
-  // ── Specific Fraction & Quantity Slang ────────────────────────────────────
+
+  // ── Specific Fraction & Trade Slang (Runs FIRST) ─────────────────────────
   [/\binch\s+and\s+a\s+quarter\b/gi, '1 1/4 inch'],
   [/\binch\s+and\s+a\s+1\/4\b/gi,    '1 1/4 inch'],
   [/\binch\s+and\s+a\s+half\b/gi,    '1 1/2 inch'],
   [/\binch\s+and\s+a\s+1\/2\b/gi,    '1 1/2 inch'],
   [/\binch\s+and\s+three\s+quarters?\b/gi, '1 3/4 inch'],
   [/\binch\s+and\s+an\s+eighth\b/gi, '1 1/8 inch'],
-  
-  // Protect quantity + fraction from merging (e.g., "20 three quarter" -> "20 3/4")
+  [/\binch\s+and\s+three\s+eighths?\b/gi, '1 3/8 inch'],
+  [/\binch\s+and\s+five\s+eighths?\b/gi, '1 5/8 inch'],
+  [/\binch\s+and\s+seven\s+eighths?\b/gi, '1 7/8 inch'],
+
+  // Protect quantities before fractions (e.g., "5 3/4" -> 5 separate from 3/4)
   [/\b(\d+)\s+three\s+quarters?\b/gi, '$1 3/4'],
   [/\b(\d+)\s+one\s+half\b/gi, '$1 1/2'],
   [/\b(\d+)\s+a\s+half\b/gi, '$1 1/2'],
   [/\b(\d+)\s+one\s+quarter\b/gi, '$1 1/4'],
   [/\b(\d+)\s+a\s+quarter\b/gi, '$1 1/4'],
-  
+  [/\b(\d+)\s+five\s+eighths?\b/gi, '$1 5/8'],
+  [/\b(\d+)\s+seven\s+eighths?\b/gi, '$1 7/8'],
+  [/\b(\d+)\s+three\s+eighths?\b/gi, '$1 3/8'],
+
+  // Fractions spoken without "inch" explicitly said
+  [/\bhalf\s+inch\b/gi, '1/2 inch'],
+  [/\bquarter\s+inch\b/gi, '1/4 inch'],
+  [/\bthree\s+quarter\s+inch\b/gi, '3/4 inch'],
+
   // ── Pipe sizes — what STT actually outputs ──────────────────────────────
   // (Keep the rest of your existing PHONETIC rules below here...)
-  
   // ── Pipe sizes — what STT actually outputs ──────────────────────────────
   // "three quarter" is the most common; engine often hears:
   [/three water/gi,          'three quarter'],
