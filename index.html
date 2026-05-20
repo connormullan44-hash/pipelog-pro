@@ -2778,9 +2778,30 @@ function initSR(){
   }
 
   recog.onresult = (ev) => {
-    let interim = '';
-    for(let i = ev.resultIndex; i < ev.results.length; i++){
-      const res = ev.results[i];
+    let silenceTimer = null;
+       const SILENCE_THRESHOLD = 3000; // 3 seconds in milliseconds
+    clearTimeout(silenceTimer);
+    silenceTimer = null setTimeout(() => {
+        if(isRec) toggleRec();
+   // ... existing initialization checks ...
+
+    if(isRec){
+        isRec = false;
+        clearTimeout(silenceTimer); // Stop the auto-stop timer
+        try{ recog.stop(); }catch(e){}
+        // ... rest of your existing stop logic
+    } else {
+        isRec = true;
+        // Start the silence timer when recording begins
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+            if(isRec) toggleRec();
+        }, SILENCE_THRESHOLD);
+        
+        // ... rest of your existing start logic
+        try{ recog.start(); }catch(e){ /* ... */ }
+    }
+}
       // Score all alternatives against trade vocabulary — don't blindly take [0]
       const best = pickBestAlt(res);
       if(res.isFinal){
